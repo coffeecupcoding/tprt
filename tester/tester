@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import socket
+import time
+
+
+prog_version = 1.0
+
+def handle_arguments():
+    arg_parser = argparse.ArgumentParser(prog='tprt-tester',
+        description='Greylisting Daemon Tester' )
+    arg_parser.add_argument('--version', '-v', action='version',
+        version='%%(prog)s version %s' % prog_version )
+    arg_parser.add_argument('--config_file', '-c', dest='config_file',
+        metavar='<file>', default='./tester.conf',
+        help='Configuration file to read' )
+    arg_parser.add_argument('--debug', dest='debug', type=bool,
+        default=False, help='Show debugging messages for tester itself' )
+    return vars(arg_parser.parse_args())
+
+
+def configure_test(args):
+    try:
+        with open(args['config_file'], mode='r') as f:
+            config = json.load(f)
+    except OSError as err:
+        message = "Error opening config file, {err} on {file}"
+        raise SystemExit(message.format(err=err.strerror, file=err.filename))
+    except json.JSONDecodeError:
+        raise SystemExit("error decoding config file")
+    return config
+            
+
+def run():
+    args = handle_arguments()
+    config = configure_test(args)
+    debug = args['debug']
+    if config['socket_type'] == 'unix':
+        socktype = socket.AF_UNIX
+        sockform = socket.SOCK_STREAM
+        sockaddr = config['socket_path']
+    elif config['socket_type'] == 'inet':
+        socktype = socket.AF_INET
+        sockform = socket.SOCK_STREAM
+        sockaddr = (config['socket_host'], config['socket_port'])
+    else:
+        raise SystemExit("unknown socket type %s", config['socket_type'])
+
+# tests is an array of dicts describing tests
+# each test has 'name':<string>, 'settings':<dict>, and 'data':<array>
+    for test in config['tests']:
+        with socket.socket(socktype, sockform) as sock:
+            sock.connect(sockaddr)
+            print("running test %s" % test['name'])
+            if test['settings'].get('pre_delay'):
+                time.sleep(test['settings']['pre_delay'])
+            for pair in test['data']:
+                send = pair[0] + '=' + pair[1] + "\n"
+                sock.sendall(bytes(send, 'utf-8'))
+            sock.sendall(b'\n')
+            reply = sock.recv(4096)
+            for line in str(reply, 'utf-8').splitlines():
+                print(line)
+            print("finished test %s\n\n" % test['name'])
+            if test['settings'].get('post_delay'):
+                time.sleep(test['settings']['post_delay'])
+
+
+if __name__ == "__main__":
+    run()
+
+

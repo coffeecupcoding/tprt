@@ -1,0 +1,128 @@
+# Examples for every configuration option, with explanations
+
+# NOT COMPLETE YET
+
+# logging levels are 0-3, the higher the logging level, the more verbose
+# 0 is no logging (see also log_type 'none'), 3 is for debugging
+# default is 2
+
+{ "log" : {
+	"log_level" : 3
+  } }      
+
+# default logging type is 'stderr'
+{ "log" : {
+	"log_type" : "stderr"
+  } }
+
+{ "log" : {
+	"log_type" : "file",
+	"log_file" : "/var/log/tprtd"
+  } }
+
+# For log_type 'syslog', the default facility is 'mail' and the default
+# destination is /dev/log (the logging socket)
+# See the logging module documentation for additional information
+{ "log" : {
+	"log_type" : "syslog",
+	"log_facility" : "mail",
+	"log_syslog_dest" : "/dev/log"
+  } }
+
+# If more control is needed, the log_type 'from_config' is available
+# this can be used to configure the logging module directly
+{ "log" : {
+    "log_type" : "from_config",
+    "config" : {
+        "version" : 1,
+        "formatters" : {
+            "standard" : {
+                "format" : "%(asctime)s - tprtd:%(levelname)s - %(message)s",
+                "datefmt" : "%Y-%m-%d %H:%M:%S"
+            }
+        },
+        "handlers" : {
+            "file" : {
+                "class" : "logging.FileHandler",
+                "formatter" : "standard",
+                "filename" : "/var/log/tprtd"
+            },
+            "stderr" : {
+                "class" : "logging.StreamHandler",
+                "formatter" : "standard"
+            }
+        },
+        "loggers" : {
+            "" : {
+                "handlers" : [ "file" ],
+                "level" : 10
+            }
+        }
+    } } }
+
+# Or logging can be disabled entirely
+{ "log" : {
+	"log_type" : "none"
+  } }
+
+
+# server settings affect how the program interacts with the OS and external
+# services other than logging
+
+# The socket that the server talks to postfix through can be tcp or unix
+# domain, with different options for each
+
+# The unix socket will be owned by the user and group the server runs as,
+# with the mode defaulting to 660
+{ "server" : {
+    "socket_type" : "unix",
+    "socket_path" : "/var/db/tprt_socket"
+    "socket_mode" : "0660"
+  } }
+
+# The tcp socket...  listen_queue_size deals with high load, and reuse_socket
+# says whether to re-open the same socket on a restart, normally those do
+# not need to be changed
+# socket_listen_host can be a hostname (which gets looked up) or an IP
+{ "server" : {
+    "socket_type" : "tcp",
+    "socket_listen_host" : "192.0.2.33",
+    "socket_listen_port" : 10023,
+    "listen_queue_size" : 100,
+    "reuse_socket" : True
+    "socket_mode" : "0660"
+  } }
+
+# If daemonize is set, the server will close input and output (and stderr if
+# it is not being used for logging) and put itself in the background
+{ "server" : {
+    "daemonize" : True
+  } }
+
+# The software can be made to chroot itself after startup, this is only
+# effective if it also drops privileges as well
+{ "server" : {
+    "chroot" : True,
+    "chroot_dir" : "/home/tprtd",
+    "user", "tprt",
+    "group", "tprt"
+  } }
+
+# The location of the pid file written by the process (potentially used by
+# management software) can be set
+{ "server" : {
+    "pid_file_path" : "/var/run/tprtd.pid"
+  } }
+
+
+# Service parameters affect how tprt does its job
+
+
+{ "service" : {
+    "pid_file_path" : "/var/run/tprtd.pid"
+  } }
+
+
+
+
+

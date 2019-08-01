@@ -1,0 +1,841 @@
+#!/usr/bin/env python3
+
+"""
+Provides a policy server for postfix that implements a greylisting policy
+See http://www.postfix.org/SMTPD_POLICY_README.html for protocol details
+See the README file for installation and configuration instructions, etc.
+"""
+
+import daemon
+from functools import partial
+import hashlib
+import ipaddress
+import json
+import logging
+import os
+import re
+import signal
+import socket
+import socketserver
+import sys
+import threading
+import time
+import urllib.parse
+
+import tprt_config
+from tprt_db.greydb import greyDB
+
+# Optional
+try:
+    import setproctitle
+    have_setproctitle = True
+except ImportError:
+    have_setproctitle = False
+
+
+# global configuration
+config = {}
+
+
+class tprtUnixServer(socketserver.ThreadingMixIn,
+    socketserver.UnixStreamServer):
+    """Use UnixStreamServer with standard threading implementation"""
+    pass
+
+
+class whitelistIpv4:
+    """
+    This class manages a whitelist of IPv4 addresses of remote servers
+    """
+
+    def __init__(self):
+        self._whitelist = []
+
+    def add(self, entry):
+        net = entry.get('net')
+        mask = entry.get('mask')
+        self._whitelist.append(
+            ipaddress.IPv4Network((net, mask), strict=False) )
+        logging.debug("added ipv4 WL entry %s/%s", net, mask)
+
+    def match(self, request):
+        addr = request['remote_ip']
+        if addr.version == 4:
+            for net in self._whitelist:
+                if addr in net:
+                    logging.info("request matched %s in ipv4 WL", str(net))
+                    return True
+        return False
+
+
+class whitelistIpv6:
+    """
+    This class manages a whitelist of IPv6 addresses of remote servers
+    """
+
+    def __init__(self):
+        self._whitelist = []
+
+    def add(self, entry):
+        net = entry.get('net')
+        mask = entry.get('mask')
+        self._whitelist.append(
+            ipaddress.IPv6Network((net, mask), strict=False) )
+        logging.debug("added ipv6 WL entry %s/%s", net, mask)
+
+    def match(self, request):
+        addr = request['remote_ip']
+        if addr.version == 6:
+            for net in self._whitelist:
+                if addr in net:
+                    logging.info("request matched %s in ipv6 WL", str(net))
+                    return True
+        return False
+
+
+class whitelistRemoteName:
+    """
+    This class manages a whitelist of remote server name regexes
+    """
+
+    def __init__(self):
+        self._whitelist = []
+
+    def add(self, entry):
+        self._whitelist.append(
+            # default to case-insensitive matching
+            re.compile(entry.get('regex'),re.I) )
+        logging.debug("added remote name WL regex %s", entry.get('regex'))
+
+    def match(self, request):
+        for entry in self._whitelist:
+            if entry.match(request.get('client_name')):
+                logging.info("remote name matched %s in WL", entry.pattern)
+                return True
+        return False
+
+
+class whitelistRecipient:
+    """
+    This class manages a whitelist of recipient names and/or regexes
+    """
+
+    def __init__(self):
+        self._whitelist = []
+
+    def add(self, entry):
+        entry_type = entry.get('type')
+        if entry_type == 'recipient_regex':
+            self._whitelist.append(
+            # default to case-insensitive matching
+            re.compile(entry.get('regex'),re.I) )
+            logging.debug("added recipient WL regex %s", entry.get('regex'))
+        else: # the only other type is currently 'recipient_literal'
+            elements = entry.get('recipient','').split('@')
+            if len(elements) > 2:
+                # malformed, ignore
+                return
+            elif len(elements) == 1:
+                if elements[0] == '':
+                    # malformed, ignore
+                    return
+                # user by itself, so fix up domain part
+                user = re.escape(elements[0])
+                domain = '.+'
+            elif elements[1] == '':
+                # user@, so fix up domain part
+                user = re.escape(elements[0])
+                domain = '.+'
+            elif elements[0] == '':
+                # @domain, so fix up user part
+                user = '.+'
+                domain = re.escape(elements[1])
+            else:
+                user = re.escape(elements[0])
+                domain = re.escape(elements[1])
+            self._whitelist.append(
+                re.compile('^' + user + '(?:\+[^@]+)?@' + domain + '$', re.I) )
+            logging.debug("added recipient WL entry %s@%s", user, domain)
+
+    def match(self, request):
+        for entry in self._whitelist:
+            if entry.match(request.get('recipient')):
+                logging.info("recipient matched %s in WL", entry.pattern)
+                return True
+        return False
+
+
+# Used for temporary debugging, normally not called anywhere
+def _print_config(section):
+    """Print part of the configuration tree"""
+    for arg in config[section].items():
+        print(arg)
+
+
+def set_up_logging():
+    """Prepare and start the logging system"""
+    tprt_config.configure_logging(config)
+    log_format = "%(asctime)s - tprtd:%(levelname)s - %(message)s"
+    log_date_format = "%Y-%m-%d %H:%M:%S"
+    if config['log']['log_type'] == 'none':
+        logging.disable(logging.CRITICAL)
+    elif config['log']['log_type'] == 'from_config':
+        # logging.config masks logging if the import doesn't actually happen
+        import logging.config as logconf
+        logconf.dictConfig(config['log']['config'])
+    elif config['log']['log_type'] == 'file':
+        logging.basicConfig(filename=config['log']['log_file'],
+            format=log_format, datefmt=log_date_format,
+            level=config['log']['log_level'] )
+    elif config['log']['log_type'] == 'syslog':
+        handler = logging.SyslogHandler(
+            address=config['log']['log_syslog_dest'],
+            facility=config['log']['log_facility'] )
+        logging.basicConfig(handlers=[ handler ],
+            format=log_format, datefmt=log_date_format,
+            level=config['log']['log_level'] )
+    elif config['log']['log_type'] == 'stderr':
+        logging.basicConfig(level=config['log']['log_level'],
+            format=log_format, datefmt=log_date_format )
+    else:
+        raise SystemExit('Unknown logging type specified')
+    # In any case...
+    if config['log']['log_level'] == logging.NOTSET:
+        logging.disable(logging.CRITICAL)
+    logging.info("begin logging")
+
+
+def set_up_socket():
+    """Prepare the socket used by the mail server(s)"""
+    if config['server']['socket_type'] == 'unix':
+        try:
+            os.lstat(config['server']['socket_path'])
+            raise SystemExit('socket path already exists')
+        except FileNotFoundError:
+            config['server']['server'] = tprtUnixServer(
+                config['server']['socket_path'], tprtRequestHandler )
+            os.chmod(config['server']['socket_path'],
+                int(config['server']['socket_mode'], 8) )
+    elif config['server']['socket_type'] == 'inet':
+        socketserver.ThreadingTCPServer.request_queue_size = (
+            config['server']['listen_queue_size'] )
+        config['server']['server'] = socketserver.ThreadingTCPServer(
+            (config['server']['socket_listen_host'],
+            config['server']['socket_listen_port']),
+            tprtRequestHandler )
+    else:
+        logging.critical("unknown socket type requested, %s",
+            config['server']['socket_type'])
+        raise SystemExit('unknown socket type')
+
+
+def write_pid_file():
+    """Open and write the pid file"""
+    pid = os.getpid()
+    try:
+        pidfile = os.open(config['server']['pid_file_path'],
+            os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, mode=0o644)
+        os.write(pidfile, bytes(pid))
+        logging.info("logging for pid %s", pid)
+    except:
+        logging.critical("could not open/write pid file %s",
+            config['server']['pid_file_path'] )
+        raise SystemExit('PID file error')
+
+
+def set_process_name():
+    """Set the name shown in the system process table"""
+    if have_setproctitle and config['server']['daemonize']:
+        logging.debug('setting process title')
+        setproctitle.setproctitle('tprtd')
+
+
+def initialize_daemon():
+    """Create and configure daemon context"""
+    dc = daemon.DaemonContext()
+    # Really should be an option to not close any files
+    # Force the issue by listing all possible fds except initial ones
+    dc.files_preserve = list(range(3,
+        daemon.daemon.get_maximum_file_descriptors()) )
+    # Get error "ValueError: min() arg is an empty sequence" if there are no
+    # 'candidate' fds to close, so take one back...
+    dc.files_preserve.pop()
+    if config['server']['daemonize']:
+        if config['server']['chroot']:
+            if config['server']['chroot_dir']:
+                dc.chroot_directory = config['server']['chroot_dir']
+                if os.path.isdir(config['server']['chroot_dir'] +
+                    config['server']['userdir'] ):
+                    dc.working_directory = config['server']['userdir']
+                else:
+                    dc.working_directory = '/'
+            else:
+                dc.chroot_directory = config['server']['userdir']
+                dc.working_directory = '/'
+        else:
+            dc.working_directory = '.'
+        dc.uid = config['server']['uid']
+        dc.gid = config['server']['gid']
+        if config['log']['log_type'] == 'stderr':
+            dc.stderr = sys.stderr
+    else:
+        # Not running as daemon, presumably in foreground for testing
+        # Still using the context, but set things up differently
+        dc.working_directory = '.'
+        dc.stdin = sys.stdin
+        dc.stdout = sys.stdout
+        dc.stderr = sys.stderr
+        dc.detach_process = False
+        dc.prevent_core = False
+    dc.umask = 0o027
+    dc.signal_map = {
+        signal.SIGHUP : handle_sighup,
+        signal.SIGINT : handle_shutdown_signal,
+        signal.SIGTERM : handle_shutdown_signal
+    }
+    config['server']['daemon_context'] = dc
+
+
+def set_up_server():
+    """Prepare server components for use"""
+    tprt_config.configure_server(config)
+    initialize_daemon()
+
+
+def process_whitelist_entry(entry, tmp_config):
+    """
+    Convert an individual whitelist file entry into an entry in the
+    appropriate list, if possible
+    """
+    entry_type = entry.get('type')
+    try:
+        if entry_type == 'ipv4_net':
+            tmp_config['remote_ipv4_wl'].add(entry)
+        elif entry_type == 'ipv6_net':
+            tmp_config['remote_ipv6_wl'].add(entry)
+        elif entry_type == 'recipient_literal':
+            tmp_config['recipient_wl'].add(entry)
+        elif (entry_type == 'remote_regex' and
+            config['service']['allow_wl_regex']):
+            tmp_config['remote_name_wl'].add(entry)
+        elif (entry_type == 'recipient_regex' and
+            config['service']['allow_wl_regex']):
+            tmp_config['recipient_wl'].add(entry)
+        else:
+            # unknown type or malformed entry, ignore
+            logging.warning("ignored malformed WL entry")
+    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+        logging.warning("ignored WL entry, malformed address")
+    except re.error:
+        logging.warning("ignored WL entry, malformed regex")
+
+
+def process_whitelist_file(f, tmp_config):
+    """Read a whitelist file and process the entries"""
+    try:
+        data_from_file = json.load(f)
+        if type(data_from_file) != dict:
+            raise json.JSONDecodeError
+        for section in data_from_file.keys():
+            for list_entry in data_from_file[section]:
+                if type(list_entry) != dict:
+                    logging.warning("ignored garbage in %s", f.name)
+                    continue
+                process_whitelist_entry(list_entry, tmp_config)
+    except json.JSONDecodeError:
+        logging.warning("failed to decode whitelist file")
+
+
+def process_whitelist_redis(source, tmp_config):
+    """
+    Read whitelist entries from an opened redis database
+    """
+    def _read_list(conn, list_name):
+        """
+        helper function to read all the elements of a redis list
+        """
+        x = 0
+        y = conn.llen(list_name)
+        list_from_name = []
+        while x < y:
+            list_from_name.append(conn.lindex(list_name, x))
+            x += 1
+        return list_from_name
+
+    def _read_dict(conn, dict_name):
+        """
+        helper function to read all the elements of a redis hash
+        """
+        dict_from_name = {}
+        for key in conn.hkeys(dict_name):
+            dict_from_name[str(key, 'utf-8')] = str(
+                conn.hget(dict_name, key), 'utf-8')
+        return dict_from_name
+
+    try:
+        # Yeah, that's an underscore...  should probably have an accessor
+        conn = source._db
+        # 'whitelists' maps to a list of key names (eg. per-user lists)
+        #   each name maps to a list of entries (entry key names)
+        #   each entry key name maps to a hash containing the entry
+        #   Easy!
+        #  Note that the entry key name itself is only used to find the entry
+        for list_name in _read_list(conn, 'whitelists'):
+            logging.debug("processing wl %s", list_name)
+            for list_entry_name in _read_list(conn, list_name):
+                logging.debug("processing entry name %s", list_entry_name)
+                list_entry = _read_dict(conn, list_entry_name)
+                logging.debug("entry is %s", list_entry)
+                process_whitelist_entry(list_entry, tmp_config)
+    except Exception as err:
+        logging.warning("error reading whitelists from %s, error %s", 
+            conn, err)
+
+
+def open_db_url(url):
+    """
+    create a database object based on the url
+    returns the database type as a string and the object itself
+    """
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme == 'file':
+        # 'db object' is the open file handle
+        db = open(parsed_url.path, mode='r')
+        db_type = 'file'
+    elif parsed_url.scheme == 'gdm':
+        from tprt_db.gdbm import gdbmDB
+        db_file = parsed_url.path
+        db = gdbmDB(db_file)
+        db_type = 'dbm'
+    elif parsed_url.scheme.startswith('redis-'):
+        from tprt_db.redis import redisDB
+        db_url = url.replace('redis-','',1)
+        db = redisDB(db_url)
+        db_type = 'redis'
+    else:
+        raise Exception("Unknown db URL scheme %s", parsed_url.scheme)
+    return (db_type, db)
+
+
+def sanitize_url(url):
+    """ Return sanitized form of database access URL """
+    return re.sub(r'/(.*):.*@',r'/\1:password@', url)
+
+
+def read_whitelists():
+    """Process all the whitelist sources"""
+    # This may be called while the server is running (to reload the lists),
+    #   so build the new overall list and then swap to minimize the time
+    #   during which the whitelists are incomplete
+    logging.info("(re-)reading whitelists")
+    tmp_config = {}
+    tmp_config['remote_ipv4_wl'] = whitelistIpv4()
+    tmp_config['remote_ipv6_wl'] = whitelistIpv6()
+    tmp_config['remote_name_wl'] = whitelistRemoteName()
+    tmp_config['recipient_wl'] = whitelistRecipient()
+    for source in config['service']['wl_sources']:
+        sanitized_source = sanitize_url(source)
+        try:
+            (source_type, source_obj) = open_db_url(source)
+            if source_type == 'file':
+                logging.info("loading data from whitelist file %s",
+                    sanitized_source)
+                process_whitelist_file(source_obj, tmp_config)
+            elif source_type == 'redis':
+                logging.info("loading data from whitelist redis DB %s",
+                    sanitized_source)
+                process_whitelist_redis(source_obj, tmp_config)
+            else:
+                logging.warning("unknown whitelist source specified: %s",
+                    sanitized_source)
+        except OSError as err:
+            logging.warning("Failed to open %s, error %s",
+                err.filename, err.strerror )
+        #except Exception as err:
+        #    logging.warning("Error reading whitelist source %s, error %s",
+        #        sanitized_source, err)
+    config['service']['remote_ipv4_wl'] = tmp_config['remote_ipv4_wl']
+    config['service']['remote_ipv6_wl'] = tmp_config['remote_ipv6_wl']
+    config['service']['remote_name_wl'] = tmp_config['remote_name_wl']
+    config['service']['recipient_wl'] = tmp_config['recipient_wl']
+
+
+def set_db_object(url, config_key):
+    """
+    Open a database that supports the greyDB interface, from a url
+    Assign the resulting database connection instance somewhere under
+      config['service']
+    """
+    try:
+        (db_type, db_obj) = open_db_url(url)
+        if isinstance(db_obj, greyDB):
+            config['service'][config_key] = db_obj
+        else:
+            raise Exception("Wrong db type %s", db_type)
+    except:
+        sanitized_url = sanitize_url(url)
+        logging.critical("failed to open DB %s", sanitized_url)
+        raise SystemExit('failed to open DB')
+
+
+def set_up_grey_db():
+    """
+    Open the database used for greylisting data
+    """
+    url = config['service']['grey_db']
+    set_db_object(url, 'db')
+
+
+def set_up_awl_db():
+    """
+    Open the database used for auto-whitelisting (awl) data
+    """
+    if config['service']['awl_client_count'] > 0:
+        url = config['service']['awl_db']
+        set_db_object(url, 'awldb')
+
+
+def set_up_service():
+    """Prepare the service components for use"""
+    tprt_config.configure_service(config)
+    read_whitelists()
+    set_up_grey_db()
+    set_up_awl_db()
+
+
+def handle_shutdown_signal(signum, frame):
+    """The handler for signals that should result in server shutdown"""
+    # safe to log here as signals are received in the main thread
+    logging.warning("received signal %s", signum)
+    do_shutdown()
+
+
+def handle_sighup(signum, frame):
+    """SIGHUP causes the whitelists to be reloaded"""
+    logging.info("received SIGHUP, reloading whitelists")
+    read_whitelists()
+
+
+def do_shutdown():
+    """
+    Do actions needed for clean shutdown
+    Close socket; save databases
+    """
+    logging.warning("shutting down")
+    config['server']['server'].shutdown()
+    config['service']['db'].save()
+    if 'awldb' in config['service']:
+        config['service']['awldb'].save()
+    
+
+def clean_up_sender(sender):
+    """
+    Normalize sender address for DB
+    Returns the cleaned up string
+    """
+    logging.debug("cleaning up sender %s", sender)
+    user,domain = sender.split('@')
+    # remove bounce address verification
+    if user.startswith('prvs='):
+        elements = user.split('=')
+        if re.match('[0-9a-zA-Z]{10}',elements[1]):
+            user = elements[2]
+        else:
+            user = elements[1]
+    # remove sender address user extension
+    user = user.split('+')[0]
+    # remove some mailing list markings?
+    user = re.sub('\b\d+\b','#',user)
+    logging.debug("cleaning results in %s", user + '@' +domain)
+    return user + '@' + domain
+
+
+def valid_request(request):
+    """Check for essentials in the request from the server"""
+    logging.debug("validating request")
+    if request.get('request') != 'smtpd_access_policy':
+        logging.warning("unknown request type, punting")
+        return False
+    for attribute in ['client_address', 'client_name', 'recipient', 'sender' ]:
+        if not request.get(attribute):
+            logging.warning("missing attribute %s in request", attribute)
+            return False
+    return True
+
+
+def make_key(*args):
+    """
+    Generate a database key from passed-in strings
+    Returns the key
+    """
+    key = '/'.join(args).lower()
+    if config['service']['hash_grey_db']:
+        key = hashlib.sha1(bytes(key, 'utf-8')).hexdigest()
+    return key
+
+
+def normalize_remote_ip(request):
+    """
+    Validate and apply netmasks to remote_ip from request
+    Returns a string containing the canonical net, eg. "192.168.0.0/24"
+    """
+    try:
+        # set this in the request for whitelist checking
+        request['remote_ip'] = ipaddress.ip_address(
+            request.get('client_address') )
+    except ipaddress.ValueError:
+        logging.warning("failed to convert client_address %s, punting",
+            request.get('client_address') )
+        return None
+    if request['remote_ip'].version == 4:
+        remote_obj = ipaddress.IPv4Network(
+            (request['remote_ip'], config['service']['ipv4_mask']),
+            strict=False )
+    elif request['remote_ip'].version == 6:
+        remote_obj = ipaddress.IPv6Network(
+            (request['remote_ip'], config['service']['ipv6_mask']),
+            strict=False )
+    else:
+        # shouldn't get here; something's wrong
+        return None
+    return str(remote_obj)
+
+
+def in_whitelists(request, remote):
+    """
+    Check whether a request matches any of the whitelists
+    Returns True or False
+    """
+    # Ideally there'd be a list of whitelist objects and this would
+    #   just ask each one in turn to check...
+    logging.debug("checking whitelists")
+    addr = request['remote_ip']
+    if (config['service']['remote_ipv4_wl'].match(request) or
+        config['service']['remote_ipv6_wl'].match(request) or
+        config['service']['remote_name_wl'].match(request) or
+        config['service']['recipient_wl'].match(request) ):
+        return True
+    if 'awldb' in config['service']:
+        key = make_key(remote)
+        data = config['service']['awldb'].get(key)
+        if data:
+            count = int(str(data, 'utf-8').split(',')[0])
+            if count >= config['service']['awl_client_count']:
+                logging.info("request matched auto-whitelist DB entry")
+                # this means counting in awldb stops once awl_client_count
+                #   is reached
+                return True
+    logging.debug("request did not match whitelists")
+    return False
+
+
+def update_auto_whitelist(remote, now_str):
+    """Add or update an auto-whitelist entry"""
+    if 'awldb' in config['service']:
+        key = make_key(remote)
+        data = config['service']['awldb'].get(key)
+        if data:
+            count = int(str(data, 'utf-8').split(',')[0])
+            count += 1
+            data = str(count) + ',' + now_str
+        else:
+            data = '1,' + now_str
+        config['service']['awldb'].update(key, data)
+        config['service']['awldb'].save()
+
+
+class tprtRequestHandler(socketserver.StreamRequestHandler):
+    """The custom request handler class which implements the policy"""
+    def handle(self):
+        """Read and respond to a request from a mail server"""
+
+        def _receive(request):
+            """Read the incoming data and fill out the request hash"""
+            complete = False
+            logging.debug("receiving request")
+            while not complete:
+                line = self.rfile.readline().strip()
+                data = str(line, 'utf-8').strip()
+                if data == '':
+                    logging.debug("finished receiving request")
+                    complete = True
+                elif '=' in data:
+                    attribute,value = data.split('=',1)
+                    request[attribute] = value
+                    logging.debug("received %s = %s", attribute, value)
+                else:
+                    logging.warning("garbage in data from server, %s", data)
+                    break
+
+        def _respond(action):
+            """Send the actual response"""
+            logging.debug("sending action %s", action)
+            response = "action=%s\n\n" % action
+            self.wfile.write(bytes(response, 'utf-8'))
+
+        # Read and evaluate the request
+        # Default action is to tell the mail server to deliver the email
+        request = {}
+        _receive(request)
+
+        now = int(time.time())
+        logging.debug("processing request at %s", time.ctime(now))
+
+        if not valid_request(request):
+            _respond('DUNNO')
+            return
+
+        remote = normalize_remote_ip(request)
+
+        if not remote:
+            _respond('DUNNO')
+            return
+
+        if in_whitelists(request, remote):
+            _respond('DUNNO')
+            return
+
+        sender = clean_up_sender(request['sender'])
+        recipient = request['recipient']
+
+        logging.info("checking greylist for remote %s, sender %s, "
+            "recipient %s", remote, sender, recipient)
+
+        key = make_key(remote, sender, recipient)
+        logging.debug("key for this request is %s", key)
+
+        db_value = config['service']['db'].get(key)
+        entry_type = 'grey'
+        now_str = str(now)
+
+        # match entries / create new data
+        # also update awl here if in use
+        if db_value:
+            count,last = [int(x) for x in str(db_value, 'utf-8').split(',')]
+            if count > 0:
+                logging.debug("existing greylist entry")
+                entry_type = 'seen'
+                count += 1
+                new_value = str(count) + ',' + now_str
+                update_auto_whitelist(remote, now_str)
+            else:
+                waited = now - last
+                if waited > config['service']['grey_retry_window']:
+                    logging.info("entry found but expired, starting over")
+                    new_value = "0," + now_str
+                    waited = 0
+                elif waited > config['service']['grey_delay']:
+                    logging.info("first time passing greylist")
+                    entry_type = 'first'
+                    new_value = "1," + now_str
+                    update_auto_whitelist(remote, now_str)
+                else:
+                    logging.info("still greylisted")
+                    new_value = None
+        else:
+            logging.info("new greylist entry")
+            new_value = "0," + now_str
+            waited = 0
+
+        # take the appropriate actions
+        if new_value:
+            logging.debug("updating db with key %s, value %s", key, new_value)
+            config['service']['db'].update(key, new_value)
+            config['service']['db'].save()
+        if entry_type == 'grey':
+            to_wait = config['service']['grey_delay'] - waited
+            msg = config['service']['grey_text'].format(wait=to_wait)
+            _respond(config['service']['grey_action'] + ' ' + msg)
+            return
+        elif entry_type == 'first':
+            msg = config['service']['grey_smtp_header'].format(
+                delay=waited,
+                hostname=config['service']['grey_hostname'],
+                date=time.ctime(now) )
+            _respond('PREPEND ' + msg)
+            return
+        else:
+            _respond('DUNNO')
+            return
+                
+
+def check_expired(min_time, key, value):
+    """
+    Check if a key's last update is older than a specified time
+    Returns the key if it is older
+    This is a template function: min_time is filled in when this is passed to
+    the database apply() method
+    """
+    last_seen = int(str(value, 'utf-8').split(',')[1])
+    if min_time > last_seen:
+        return key
+    else:
+        return None
+
+
+def make_current_expired_check(now):
+    """Generate a version of check_expired() with a specific time"""
+    min_time = now - config['service']['grey_max_age']
+    return partial(check_expired, min_time)
+
+
+def clean_up_db(db, now):
+    """Remove DB entries not updated for awhile"""
+    to_be_removed = db.apply(
+        make_current_expired_check(now) )
+    for key in to_be_removed:
+        logging.debug("deleting key %s from db", key)
+        db.delete(key)
+    db.save()
+
+
+def do_maintenance():
+    """Do maintenance tasks needed by the service"""
+    while True:
+        time.sleep(config['service']['maintenance_interval'])
+        now = int(time.time())
+        logging.info("running maintenance")
+        if not config['service']['grey_db_maintenance_disable']:
+            logging.debug("cleaning up greylisting DB")
+            clean_up_db(config['service']['db'], now)
+        if ( 'awldb' in config['service'] and not
+          config['service']['awl_db_maintenance_disable'] ):
+            logging.debug("cleaning up auto-whitelist DB")
+            clean_up_db(config['service']['awldb'], now)
+
+
+def run_service():
+    """Start and clean up after the service threads"""
+    with config['server']['daemon_context']:
+        logging.info("starting service")
+        set_up_socket()
+        write_pid_file()
+        maint_thread = threading.Thread(
+            target=do_maintenance, daemon=True )
+        server_thread = threading.Thread(
+            target=config['server']['server'].serve_forever )
+        logging.debug("starting maintenance thread")
+        maint_thread.start()
+        logging.debug("starting server thread")
+        server_thread.start()
+        server_thread.join()
+        logging.debug("after server thread join, should be exiting")
+        if config['server']['socket_type'] == 'unix':
+            os.remove(config['server']['socket_path'])
+        if config['server']['daemonize']:
+            os.remove(config['server']['pid_file_path'])
+
+
+def run():
+    """Perform all necessary actions to run the service"""
+    tprt_config.initialize_config(config)
+    set_up_logging()
+    set_up_service()
+    set_up_server()
+    set_process_name()
+    run_service()
+
+
+if __name__ == "__main__":
+    run()
+
