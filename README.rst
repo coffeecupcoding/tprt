@@ -24,19 +24,19 @@ Features
 - Greylisting with a dbm or redis database backend
 
 - Configurable minimum time to pass greylisting, hostname and text to pass to
-the postfix server, additional SMTP header, maximum age (time between uses) of
-greylist entries, maxiumum age of unused greylist entries, interval between
-database maintenance passes, and default network masks
+  the postfix server, additional SMTP header, maximum age (time between uses) of
+  greylist entries, maxiumum age of unused greylist entries, interval between
+  database maintenance passes, and default network masks
 
 - In memory whitelists (read from files or redis databases).  Whitelisting
-based on sender IP network, or recipient email (but not ANDed
-combinations of these, yet).  Optional support for regular expressions to
-match sender or recipient email.  Whitelists can be re-read while the
-server is running
+  based on sender IP network, or recipient email (but not ANDed
+  combinations of these, yet).  Optional support for regular expressions to
+  match sender or recipient email.  Whitelists can be re-read while the
+  server is running
 
 - Horizontal scaling through support for remote (redis) databases for 
-greylisting and whitelists, and the ability to disable database maintenance
-on all but one instance
+  greylisting and whitelists, and the ability to disable database maintenance
+  on all but one instance
 
 - Logging to stdout, file, or syslog, or logging can be disabled entirely
 
