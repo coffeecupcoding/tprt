@@ -52,7 +52,7 @@ parameters have defaults, but these defaults are geared towards local testing
 from the command-line.  Also, some but not all of the configuration options
 have corresponding command-line arguments.  This is intentional: the
 command-line arguments are intended primarily for controlling how the service
-is run, not how it does its work.  See the file examples.config for options.
+is run, not how it does its work.  See examples/configuration for options.
 
 
 Whitelists
@@ -70,7 +70,7 @@ probably a good idea to do additional screening on whitelist entries provided
 by users even if regex entries are not allowed: it would be easy to render the
 greylisting policy ineffective with a few well-chosen entries.
 
-The file examples.whitelist has a complete list of entry types as they would
+The file examples/whitelist has a complete list of entry types as they would
 appear in a file.  There is a tool (wl_importer.py) that can be used to
 import a file into a redis dataase.
 
@@ -107,4 +107,19 @@ Refactoring targets
 - Perhaps split server and service code into separate modules, and pass
   around a 'config' object rather than having it as a global variable
 - config_helpers.set_parameter() is kind of dumb, rethink it
+
+
+Acknowledgments
+---------------
+
+This program would not exist if it were not for David Schweikert's postgrey.pl,
+which I used for many years.  The internal logic is based on it, though
+the structure is very different by necessity.  While I wrote this partially
+because I was concerned about several aspects of that code, it is actually
+a fairly typical example of how services were written in Perl at the time,
+and it has made running an individual mail server much more reasonable.
+
+I have benefited a great deal in writing this from Mark Lutz's Learning
+Python, and from all the resources made available online through python.org
+and other sites by the Python community...  Thanks for your efforts!
 

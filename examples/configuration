@@ -1,7 +1,5 @@
 # Examples for every configuration option, with explanations
 
-# NOT COMPLETE YET
-
 # logging levels are 0-3, the higher the logging level, the more verbose
 # 0 is no logging (see also log_type 'none'), 3 is for debugging
 # default is 2
@@ -103,7 +101,7 @@
 # effective if it also drops privileges as well
 { "server" : {
     "chroot" : True,
-    "chroot_dir" : "/home/tprtd",
+    "chroot_dir" : "/home/tprt",
     "user", "tprt",
     "group", "tprt"
   } }
@@ -117,12 +115,132 @@
 
 # Service parameters affect how tprt does its job
 
-
+# The default hostname is that of the IP being used for communicating with
+# postfix... this gets used in grey_smtp_header below, especially in
+# multi-daemon setups it would be a good idea to set a sensible hostname
 { "service" : {
-    "pid_file_path" : "/var/run/tprtd.pid"
+    "grey_hostname" : "mail.example.com"
   } }
 
+# The minimum allowed time from the first delivery attempt to the second.
+# The default is 300 seconds, the RFC recommends a retry after 30 minutes,
+# but some servers retry in as few as 60 seconds... it seems like a large
+# fraction of spam bots either never retry or retry immediately
+{ "service" : {
+    "grey_delay" : 55
+  } }
 
+# Technically, these are prefix lengths, not masks.  They are the lengths
+# to use when storing a remote IP in the greylisting DB, so any address in
+# the resulting range will be considered a match.  You may want to change
+# these if there is a lot of traffic from domains using a larger block for
+# outgoing mail IPs.  The default for IPv6, /48, is probably unnecessarily
+# permissive
+{ "service" : {
+    "ipv4_mask" : 20,
+    "ipv6_mask" : 64
+  } }
 
+# Sets the action returned to Postfix when a message is being greylisted.
+# You probably won't need to change this
+{ "service" : {
+    "grey_action" : "DEFER_IF_PERMIT"
+  } }
 
+# The text returned with the greylisting status that goes in the SMTP response
+# There are several variables available to go in this text, but they have no
+# impact on what the remote server does in response
+{ "service" : {
+    "grey_text" : "Greylisted, please retry in {wait} seconds"
+  } }
+
+# How long to hold onto greylisting entries after they've been used.  Each
+# use resets the timer.  The default is a bit over a month, some sites might
+# want longer
+{ "service" : {
+    "grey_max_age" : 3024000
+  } }
+
+# How often to run maintenance tasks, including clearing unused entries
+# These tasks could put a load on the database or the server... note that
+# it's possible to have an instance that only runs maintenance tasks, and
+# to disable them on other instances where multiple instances are run
+# The default is every hour
+{ "service" : {
+    "maintenance_interval" : 3600
+  } }
+
+# Whether or not to hash the values written into the greylisting database.
+# Defaults to True, with false the database will contain remote server
+# networks and email addresses, which may not be ideal
+{ "service" : {
+    "hash_grey_db" : True
+  } }
+
+# How long to keep an initial (no-retry) greylisting database entry
+# This could be lower if desired, but should never be shorter than an hour
+# as legitimate servers could reasonably wait that long
+{ "service" : {
+    "grey_retry_window" : 172800
+  } }
+
+# A header to return to Postfix to add to an email that has been delayed
+# and then accepted.  Mostly for the end user's edification.  As with
+# grey_text, there are some variables that can be inserted into the message
+{ "service" : {
+    "grey_smtp_header" : "X-Greylist: delayed {delay} seconds at {hostname}; {date}"
+  } }
+
+# The 'URL' for access to the greylisting database.  The URL format is used
+# but the contents are database-type specific.  Here are several examples,
+# see the redis module documentation for more options
+{ "service" : {
+    "grey_db" : "dbm:///var/db/greylisting_db"
+    "grey_db" : "redis-unix://user:password@/var/db/redis_socket"
+    "grey_db" : "redis-tcp://localhost:6379/?db=2"
+  } }
+
+# Set to True to NOT run maintenance tasks for the greylisting database on
+# this instance
+{ "service" : {
+    "grey_db_maintenance_disable" : True
+  } }
+
+# How many times a particular greylisting entry gets seen before it is
+# added to the auto-whitelist database.  The default, 0, disables
+# auto-whitelisting
+{ "service" : {
+    "awl_client_count" : 1000
+  } }
+
+# How to access the auto-whitelisting database if it is in use.  The format
+# is the same as for grey_db.  Sharing the database between greylisting and
+# and auto-whitelisting has NOT been tested
+{ "service" : {
+    "awl_db" : "dbm:///var/db/greylisting_db"
+    "awl_db" : "redis-unix://user:password@/var/db/redis_socket"
+    "awl_db" : "redis-tcp://localhost:6379/?db=2"
+  } }
+
+# Set to True to NOT run maintenance tasks for the auto-whitelisting database
+# on this instance
+{ "service" : {
+    "awl_db_maintenance_disable" : True
+  } }
+
+# A list of whitelist files or databases to read whitelist entries from.
+# The URL format is the same as for the greylisting database, except that
+# 'file' (a json file) is supported instead of 'dbm'.  It is NOT possible
+# (currently) to share a redis database between greylisting and whitelists
+{ "service" : {
+    "wl_sources" : [ "file:///var/db/whitelist1", "redis-tcp://192.0.2.55:6379/?db=10" ]
+  } }
+
+# Allow regular expression whitelist entries.  This is potentially dangerous
+# as a badly written regex could bog down the whole system (or even be an
+# avenue of attack), so it is disabled by default.  Currently, the only way
+# to match on a sender email address is to use a regex.
+{ "service" : {
+    "allow_wl_regex" : True
+  } }
 
