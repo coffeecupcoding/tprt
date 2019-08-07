@@ -189,7 +189,7 @@ def set_up_logging():
             level=config['log']['log_level'] )
     elif config['log']['log_type'] == 'syslog':
         import logging.handlers as loghandlers
-        handler = loghandlers.SyslogHandler(
+        handler = loghandlers.SysLogHandler(
             address=config['log']['log_syslog_dest'],
             facility=config['log']['log_facility'] )
         logging.basicConfig(handlers=[ handler ],
