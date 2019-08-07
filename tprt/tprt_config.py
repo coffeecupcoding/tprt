@@ -24,7 +24,7 @@ import config_helpers
 # Settings used by config_helpers
 config_helpers.program_name = 'tprt'
 config_helpers.program_description = 'Greylisting Policy Daemon'
-config_helpers.program_version = '0.9.2'
+config_helpers.program_version = '0.9.3'
 
 
 # defaults that could or should be changed by distribution maintainers
@@ -146,7 +146,7 @@ def configure_service(config):
                    ('grey_db', grey_db_default),
                    ('grey_db_maintenance_disable', False),
                    ('awl_client_count', 0),
-                   ('awl_db', wl_db_default),
+                   ('awl_db', awl_db_default),
                    ('awl_db_maintenance_disable', False),
                    ('wl_sources', wl_sources_default),
                    ('allow_wl_regex', False)
