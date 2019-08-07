@@ -5,7 +5,7 @@ with open("README.rst", "r") as fh:
 
 setuptools.setup(
     name="tprt",
-    version="1.0.0",
+    version="0.9.1",
     author="James Hewitt",
     author_email="coffeecupcoding@caurinus.com",
     description="Provides a greylisting policy server for Postfix",

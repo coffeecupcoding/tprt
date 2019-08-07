@@ -24,17 +24,18 @@ import config_helpers
 # Settings used by config_helpers
 config_helpers.program_name = 'tprt'
 config_helpers.program_description = 'Greylisting Policy Daemon'
-config_helpers.program_version = '0.9'
-config_helpers.default_config_file = '/usr/local/etc/tprt/tprt.conf'
+config_helpers.program_version = '0.9.1'
 
 
 # defaults that could or should be changed by distribution maintainers
+config_path_default = '/usr/local/etc/tprt/tprt.conf'
 socket_path_default = '/var/run/tprt/socket'
 pid_file_path_default = '/var/run/tprt/tprt.pid'
-grey_db_default = 'file:///var/db/tprt/greylistdb'
-wl_db_default = 'file:///var/db/tprt/autowldb'
+grey_db_default = 'gdbm:///var/db/tprt/greylistdb'
+awl_db_default = 'gdbm:///var/db/tprt/autowldb'
 wl_sources_default = [ 'file:///var/db/tprt/whitelist' ]
 
+config_helpers.default_config_file = config_path_default
 
 def initialize_config(config):
     """

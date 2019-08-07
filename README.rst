@@ -86,8 +86,8 @@ Todo
 - Take another pass at reducing the number of command-line options, while
   maintaining those critical to use with supervisor systems
 - Add validation of the redis initialization parameters
-- Reconsider the use of the 'daemon' module, the original homegrown daemon
-  code was cleaner and just needed a few additional features
+- Reconsider the use of the 'python-daemon' module, the original homegrown
+  daemon code was cleaner and just needed a few additional features
 - Evaluate the "something's wrong" responses, as some of them should cause the
   socket to be closed (and re-opened?)
 - Provide tools to ease migration from postgrey to tprt
@@ -97,6 +97,9 @@ Todo
   config_helpers.directConfig): lists and dicts would be useful
 - Add configuration support for encrypted (TLS) connections to redis
 - Add an accessor for the database connection in database object classes
+- Move version information into a separate file (perhaps with the name)
+- No, really: move away from the python-daemon module, it's buggy
+- Fix socket code to re-open socket if pid check has passed
 
 
 Refactoring targets
