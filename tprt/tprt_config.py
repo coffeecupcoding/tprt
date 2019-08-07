@@ -24,7 +24,7 @@ import config_helpers
 # Settings used by config_helpers
 config_helpers.program_name = 'tprt'
 config_helpers.program_description = 'Greylisting Policy Daemon'
-config_helpers.program_version = '0.9.1'
+config_helpers.program_version = '0.9.2'
 
 
 # defaults that could or should be changed by distribution maintainers
