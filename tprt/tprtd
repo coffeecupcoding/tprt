@@ -188,7 +188,8 @@ def set_up_logging():
             format=log_format, datefmt=log_date_format,
             level=config['log']['log_level'] )
     elif config['log']['log_type'] == 'syslog':
-        handler = logging.SyslogHandler(
+        import logging.handlers as loghandlers
+        handler = loghandlers.SyslogHandler(
             address=config['log']['log_syslog_dest'],
             facility=config['log']['log_facility'] )
         logging.basicConfig(handlers=[ handler ],
@@ -240,7 +241,7 @@ def write_pid_file():
     except:
         logging.critical("could not open/write pid file %s",
             config['server']['pid_file_path'] )
-        raise SystemExit('PID file error')
+        raise
 
 
 def set_process_name():
@@ -402,18 +403,18 @@ def open_db_url(url):
         # 'db object' is the open file handle
         db = open(parsed_url.path, mode='r')
         db_type = 'file'
-    elif parsed_url.scheme == 'gdm':
+    elif parsed_url.scheme == 'gdbm':
         from tprt_db.gdbm import gdbmDB
         db_file = parsed_url.path
         db = gdbmDB(db_file)
-        db_type = 'dbm'
+        db_type = 'gdbm'
     elif parsed_url.scheme.startswith('redis-'):
         from tprt_db.redis import redisDB
         db_url = url.replace('redis-','',1)
         db = redisDB(db_url)
         db_type = 'redis'
     else:
-        raise Exception("Unknown db URL scheme %s", parsed_url.scheme)
+        raise Exception("Unknown db URL scheme %s" % parsed_url.scheme)
     return (db_type, db)
 
 
@@ -451,9 +452,6 @@ def read_whitelists():
         except OSError as err:
             logging.warning("Failed to open %s, error %s",
                 err.filename, err.strerror )
-        #except Exception as err:
-        #    logging.warning("Error reading whitelist source %s, error %s",
-        #        sanitized_source, err)
     config['service']['remote_ipv4_wl'] = tmp_config['remote_ipv4_wl']
     config['service']['remote_ipv6_wl'] = tmp_config['remote_ipv6_wl']
     config['service']['remote_name_wl'] = tmp_config['remote_name_wl']
@@ -471,11 +469,11 @@ def set_db_object(url, config_key):
         if isinstance(db_obj, greyDB):
             config['service'][config_key] = db_obj
         else:
-            raise Exception("Wrong db type %s", db_type)
+            raise Exception("Wrong db type %s" % db_type)
     except:
         sanitized_url = sanitize_url(url)
         logging.critical("failed to open DB %s", sanitized_url)
-        raise SystemExit('failed to open DB')
+        raise
 
 
 def set_up_grey_db():

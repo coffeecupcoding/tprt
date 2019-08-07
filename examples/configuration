@@ -195,7 +195,7 @@
 # but the contents are database-type specific.  Here are several examples,
 # see the redis module documentation for more options
 { "service" : {
-    "grey_db" : "dbm:///var/db/greylisting_db"
+    "grey_db" : "gdbm:///var/db/greylisting_db"
     "grey_db" : "redis-unix://user:password@/var/db/redis_socket"
     "grey_db" : "redis-tcp://localhost:6379/?db=2"
   } }
